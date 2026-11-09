@@ -32,3 +32,13 @@ sequential scan is cheaper than many index lookups. The planner decides from tab
 |---|---|
 | 1st `GET /api/products/1` (PostgreSQL) | 9.5 ms |
 | 2nd `GET /api/products/1` (Redis) | 1.9 ms |
+
+## Load test (k6, 50 VUs, 30 s, 4 vCPU / 16 GB, API called directly, rate limit disabled)
+
+| Scenario | p95 | avg | req/s | Errors |
+|---|---|---|---|---|
+| `GET /api/products/:id`, `PRODUCT_CACHE_TTL=0` | 67.08 ms | 53.1 ms | ~940 | 0% |
+| `GET /api/products/:id`, `PRODUCT_CACHE_TTL=60` | 27.97 ms | 20.3 ms | ~2,448 | 0% |
+| `GET /api/products?limit=20` | 108.76 ms | 89.3 ms | ~559 | 0% |
+
+Run: `k6 run -e TOKEN=<token> -e BASE_URL=http://localhost:3000 load/product-detail.js`

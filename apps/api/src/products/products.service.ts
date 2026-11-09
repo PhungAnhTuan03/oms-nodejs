@@ -72,12 +72,14 @@ export class ProductsService {
   }
 
   async findOne(id: number) {
-    const cached = await this.redis.get(productKey(id));
-    if (cached) return JSON.parse(cached);
-
+    const ttl = Number(process.env.PRODUCT_CACHE_TTL ?? 60); // 0 = tắt cache
+    if (ttl > 0) {
+      const cached = await this.redis.get(productKey(id));
+      if (cached) return JSON.parse(cached);
+    }
     const product = await this.prisma.product.findUnique({ where: { id }, include: WITH_VARIANTS });
     if (!product) throw new NotFoundException(`Không tìm thấy sản phẩm ${id}`);
-    await this.redis.set(productKey(id), JSON.stringify(product), 'EX', 60);
+    if (ttl > 0) await this.redis.set(productKey(id), JSON.stringify(product), 'EX', ttl);
     return product;
   }
 
