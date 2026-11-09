@@ -19,5 +19,16 @@ services:
     ports:
       - "6379:6379"
 
+  postgres-test:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: oms
+      POSTGRES_PASSWORD: oms
+      POSTGRES_DB: oms_test
+    ports:
+      - "5433:5432"
+    tmpfs:
+      - /var/lib/postgresql/data
+
 volumes:
   pgdata:
