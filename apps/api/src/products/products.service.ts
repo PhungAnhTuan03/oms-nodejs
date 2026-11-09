@@ -78,4 +78,19 @@ export class ProductsService {
     });
     return { deleted: true };
   }
+  // 5 biến thể hay được mua cùng variantId nhất
+  async boughtTogether(variantId: number) {
+    const pairs = await this.prisma.$queryRaw<{ variantId: number; count: number }[]>`
+      SELECT CASE WHEN "variantA" = ${variantId} THEN "variantB" ELSE "variantA" END AS "variantId",
+             count
+      FROM "VariantPair"
+      WHERE "variantA" = ${variantId} OR "variantB" = ${variantId}
+      ORDER BY count DESC
+      LIMIT 5`;
+    const variants = await this.prisma.variant.findMany({
+      where: { id: { in: pairs.map((p) => p.variantId) } },
+      include: { product: true },
+    });
+    return pairs.map((p) => ({ ...p, variant: variants.find((v) => v.id === p.variantId) }));
+  }
 }

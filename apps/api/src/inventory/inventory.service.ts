@@ -1,6 +1,7 @@
 import { ConflictException, Injectable } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { AdjustInventoryDto } from './dto/adjust-inventory.dto.js';
+import { reorderPoint } from './reorder.js';
 
 @Injectable()
 export class InventoryService {
@@ -33,5 +34,27 @@ export class InventoryService {
       orderBy: { id: 'desc' },
       take: 50,
     });
+  }
+  async getReorderAlerts() {
+    const rows = await this.prisma.$queryRaw<
+      { variantId: number; sku: string; name: string; available: number; avgDaily: number }[]
+    >`
+      SELECT v.id AS "variantId", v.sku, p.name, i.available,
+             (COALESCE(s.sold, 0) / 30.0)::float8 AS "avgDaily"
+      FROM "Variant" v
+      JOIN "Product" p   ON p.id = v."productId"
+      JOIN "Inventory" i ON i."variantId" = v.id
+      LEFT JOIN (
+        SELECT "variantId", SUM(quantity) AS sold
+        FROM "StockMovement"
+        WHERE type = 'OUT' AND "createdAt" >= now() - interval '30 days'
+        GROUP BY "variantId"
+      ) s ON s."variantId" = v.id
+      WHERE COALESCE(s.sold, 0) > 0`;
+
+    return rows
+      .map((r) => ({ ...r, reorderPoint: reorderPoint(r.avgDaily) }))
+      .filter((r) => r.available <= r.reorderPoint)
+      .sort((a, b) => a.available - b.available);
   }
 }

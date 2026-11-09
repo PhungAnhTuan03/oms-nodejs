@@ -92,3 +92,11 @@ model WebhookEvent {
   topic      String
   receivedAt DateTime @default(now())
 }
+
+model VariantPair {
+  variantA Int
+  variantB Int
+  count    Int
+
+  @@id([variantA, variantB])
+}

@@ -13,6 +13,11 @@ import { InventoryService } from './inventory.service.js';
 export class InventoryController {
   constructor(private readonly inventory: InventoryService) {}
 
+  @Get('alerts')
+  alerts() {
+    return this.inventory.getReorderAlerts();
+  }
+
   @Post(':variantId/adjust')
   @Roles('ADMIN')
   adjust(@Param('variantId', ParseIntPipe) variantId: number, @Body() dto: AdjustInventoryDto) {

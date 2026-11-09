@@ -1,7 +1,8 @@
-import { ConflictException, Injectable, NotFoundException } from '@nestjs/common';
+import { ConflictException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { CreateOrderDto } from './dto/create-order.dto.js';
 import { ListOrdersQuery } from './dto/list-orders.query.js';
+import type { ShopifyOrderPayload } from '../webhooks/shopify.types.js';
 
 // maxWait: chờ tối đa 10 giây để lấy kết nối; timeout: transaction chạy tối đa 10 giây
 const TX_OPTIONS = { maxWait: 10_000, timeout: 10_000 };
@@ -11,6 +12,8 @@ type Line = { variantId: number; quantity: number; unitPrice: number };
 
 @Injectable()
 export class OrdersService {
+  private readonly logger = new Logger(OrdersService.name);
+
   constructor(private readonly prisma: PrismaService) {}
 
   async create(dto: CreateOrderDto) {
@@ -123,5 +126,79 @@ export class OrdersService {
     const order = await this.prisma.order.findUnique({ where: { id }, include: WITH_ITEMS });
     if (!order) throw new NotFoundException(`Không tìm thấy đơn ${id}`);
     return order;
+  }
+  async createFromShopify(payload: ShopifyOrderPayload) {
+    const shopifyOrderId = String(payload.id);
+
+    // Lớp idempotent thứ hai: đơn đã có thì thôi
+    const existing = await this.prisma.order.findUnique({ where: { shopifyOrderId } });
+    if (existing) return existing;
+
+    // Ghép SKU của Shopify với biến thể trong OMS
+    const skus = payload.line_items.map((li) => li.sku).filter((s): s is string => !!s);
+    const variants = await this.prisma.variant.findMany({ where: { sku: { in: skus } } });
+    const bySku = new Map(variants.map((v) => [v.sku, v]));
+
+    const merged = new Map<number, Line>();
+    for (const li of payload.line_items) {
+      const v = li.sku ? bySku.get(li.sku) : undefined;
+      if (!v) {
+        this.logger.warn(`Đơn Shopify ${shopifyOrderId}: SKU "${li.sku}" không có trong OMS, bỏ qua`);
+        continue;
+      }
+      const old = merged.get(v.id);
+      merged.set(v.id, {
+        variantId: v.id,
+        quantity: (old?.quantity ?? 0) + li.quantity,
+        unitPrice: Math.round(Number(li.price)),
+      });
+    }
+    const lines = [...merged.values()].sort((a, b) => a.variantId - b.variantId);
+    if (lines.length === 0) return null;
+
+    const total = lines.reduce((sum, l) => sum + l.unitPrice * l.quantity, 0);
+
+    return this.prisma.$transaction(async (tx) => {
+      for (const l of lines) {
+        const affected = await tx.$executeRaw`
+          UPDATE "Inventory" SET available = available - ${l.quantity}, "updatedAt" = now()
+          WHERE "variantId" = ${l.variantId} AND available >= ${l.quantity}`;
+        if (affected === 0) {
+          // Shopify đã bán xong nên không thể từ chối đơn.
+          // OMS thiếu hàng nghĩa là kho hai bên lệch: đưa về 0 và ghi lại để kiểm tra.
+          await tx.$executeRaw`
+            UPDATE "Inventory" SET available = 0, "updatedAt" = now() WHERE "variantId" = ${l.variantId}`;
+          await tx.stockMovement.create({
+            data: {
+              variantId: l.variantId,
+              type: 'ADJUST',
+              quantity: 0,
+              reason: `lech_kho: thieu hang khi dong bo don Shopify ${shopifyOrderId}`,
+            },
+          });
+          this.logger.warn(`Lệch kho: biến thể ${l.variantId} không đủ hàng cho đơn Shopify ${shopifyOrderId}`);
+        }
+      }
+
+      const order = await tx.order.create({
+        data: { shopifyOrderId, total, status: 'PAID', items: { create: lines } },
+      });
+      await tx.stockMovement.createMany({
+        data: lines.map((l) => ({
+          variantId: l.variantId,
+          type: 'OUT' as const,
+          quantity: l.quantity,
+          reason: 'shopify_order',
+          orderId: order.id,
+        })),
+      });
+      return order;
+    }, TX_OPTIONS);
+  }
+
+  async cancelFromShopify(payload: ShopifyOrderPayload) {
+    const order = await this.prisma.order.findUnique({ where: { shopifyOrderId: String(payload.id) } });
+    if (!order || order.status === 'CANCELLED') return null;
+    return this.cancel(order.id);
   }
 }

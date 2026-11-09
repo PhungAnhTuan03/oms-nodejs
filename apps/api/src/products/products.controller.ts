@@ -48,4 +48,8 @@ export class ProductsController {
   remove(@Param('id', ParseIntPipe) id: number) {
     return this.products.remove(id);
   }
+  @Get('variants/:variantId/bought-together')
+  boughtTogether(@Param('variantId', ParseIntPipe) variantId: number) {
+    return this.products.boughtTogether(variantId);
+  }
 }
