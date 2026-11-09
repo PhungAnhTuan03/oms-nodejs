@@ -1,14 +1,20 @@
-import { ConflictException, Injectable } from '@nestjs/common';
+import { ConflictException, Inject, Injectable } from '@nestjs/common';
+import { Redis } from 'ioredis';
 import { PrismaService } from '../prisma/prisma.service.js';
+import { invalidateProductsOfVariants } from '../redis/product-cache.js';
+import { REDIS } from '../redis/redis.module.js';
 import { AdjustInventoryDto } from './dto/adjust-inventory.dto.js';
 import { reorderPoint } from './reorder.js';
 
 @Injectable()
 export class InventoryService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    @Inject(REDIS) private readonly redis: Redis,
+  ) {}
 
   async adjust(variantId: number, dto: AdjustInventoryDto) {
-    return this.prisma.$transaction(async (tx) => {
+    const inventory = await this.prisma.$transaction(async (tx) => {
       const affected = await tx.$executeRaw`
         UPDATE "Inventory"
         SET available = available + ${dto.delta}, "updatedAt" = now()
@@ -26,6 +32,9 @@ export class InventoryService {
       });
       return tx.inventory.findUniqueOrThrow({ where: { variantId } });
     });
+
+    await invalidateProductsOfVariants(this.redis, this.prisma, [variantId]);
+    return inventory;
   }
 
   movements(variantId: number) {

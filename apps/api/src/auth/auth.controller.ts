@@ -1,5 +1,6 @@
 import { Body, Controller, Get, HttpCode, Post, Req, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
+import { RateLimitGuard } from '../common/rate-limit.guard.js';
 import { AuthService } from './auth.service.js';
 import { LoginDto } from './dto/login.dto.js';
 import { JwtAuthGuard } from './jwt-auth.guard.js';
@@ -12,6 +13,7 @@ export class AuthController {
 
   @Post('login')
   @HttpCode(200)
+  @UseGuards(RateLimitGuard)
   login(@Body() dto: LoginDto) {
     return this.auth.login(dto);
   }

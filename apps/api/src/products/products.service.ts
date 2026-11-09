@@ -1,5 +1,8 @@
-import { ConflictException, Injectable, NotFoundException } from '@nestjs/common';
+import { ConflictException, Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { Redis } from 'ioredis';
 import { PrismaService } from '../prisma/prisma.service.js';
+import { productKey } from '../redis/product-cache.js';
+import { REDIS } from '../redis/redis.module.js';
 import { CreateProductDto } from './dto/create-product.dto.js';
 import { ListProductsQuery } from './dto/list-products.query.js';
 import { UpdateProductDto } from './dto/update-product.dto.js';
@@ -8,7 +11,10 @@ const WITH_VARIANTS = { variants: { include: { inventory: true } } } as const;
 
 @Injectable()
 export class ProductsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    @Inject(REDIS) private readonly redis: Redis,
+  ) {}
 
   async create(dto: CreateProductDto) {
     try {
@@ -35,7 +41,25 @@ export class ProductsService {
   }
 
   // Phân trang cursor: lấy dư 1 bản ghi để biết còn trang sau hay không
-  async list({ cursor, limit }: ListProductsQuery) {
+  async list(query: ListProductsQuery) {
+    if (query.q?.trim()) {
+      const q = query.q.trim();
+      const ranked = await this.prisma.$queryRaw<{ id: number }[]>`
+        SELECT id
+        FROM "Product"
+        WHERE search @@ plainto_tsquery('simple', immutable_unaccent(${q}::text))
+        ORDER BY ts_rank(search, plainto_tsquery('simple', immutable_unaccent(${q}::text))) DESC
+        LIMIT ${query.limit}::int`;
+      const found = await this.prisma.product.findMany({
+        where: { id: { in: ranked.map((r) => r.id) } },
+        include: WITH_VARIANTS,
+      });
+      // Giữ đúng thứ tự xếp hạng
+      const items = ranked.map((r) => found.find((p) => p.id === r.id)!).filter(Boolean);
+      return { items, nextCursor: null };
+    }
+
+    const { cursor, limit } = query;
     const items = await this.prisma.product.findMany({
       take: limit + 1,
       ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
@@ -48,20 +72,28 @@ export class ProductsService {
   }
 
   async findOne(id: number) {
+    const cached = await this.redis.get(productKey(id));
+    if (cached) return JSON.parse(cached);
+
     const product = await this.prisma.product.findUnique({ where: { id }, include: WITH_VARIANTS });
     if (!product) throw new NotFoundException(`Không tìm thấy sản phẩm ${id}`);
+    await this.redis.set(productKey(id), JSON.stringify(product), 'EX', 60);
     return product;
   }
 
   async update(id: number, dto: UpdateProductDto) {
     await this.findOne(id);
-    return this.prisma.product.update({ where: { id }, data: dto, include: WITH_VARIANTS });
+    const product = await this.prisma.product.update({ where: { id }, data: dto, include: WITH_VARIANTS });
+    await this.redis.del(productKey(id));
+    return product;
   }
 
   async updatePrice(variantId: number, price: number) {
     const variant = await this.prisma.variant.findUnique({ where: { id: variantId } });
     if (!variant) throw new NotFoundException(`Không tìm thấy biến thể ${variantId}`);
-    return this.prisma.variant.update({ where: { id: variantId }, data: { price } });
+    const updated = await this.prisma.variant.update({ where: { id: variantId }, data: { price } });
+    await this.redis.del(productKey(variant.productId));
+    return updated;
   }
 
   async remove(id: number) {
@@ -76,6 +108,7 @@ export class ProductsService {
       await tx.variant.deleteMany({ where: { productId: id } });
       await tx.product.delete({ where: { id } });
     });
+    await this.redis.del(productKey(id));
     return { deleted: true };
   }
   // 5 biến thể hay được mua cùng variantId nhất

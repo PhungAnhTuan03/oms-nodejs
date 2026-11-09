@@ -1,5 +1,8 @@
-import { ConflictException, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { ConflictException, Inject, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { Redis } from 'ioredis';
 import { PrismaService } from '../prisma/prisma.service.js';
+import { invalidateProductsOfVariants } from '../redis/product-cache.js';
+import { REDIS } from '../redis/redis.module.js';
 import { CreateOrderDto } from './dto/create-order.dto.js';
 import { ListOrdersQuery } from './dto/list-orders.query.js';
 import type { ShopifyOrderPayload } from '../webhooks/shopify.types.js';
@@ -14,7 +17,10 @@ type Line = { variantId: number; quantity: number; unitPrice: number };
 export class OrdersService {
   private readonly logger = new Logger(OrdersService.name);
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    @Inject(REDIS) private readonly redis: Redis,
+  ) {}
 
   async create(dto: CreateOrderDto) {
     // 1. Gộp các dòng trùng variant (ví dụ gửi variant 1 hai lần) thành một dòng
@@ -27,7 +33,7 @@ export class OrdersService {
       .map(([variantId, quantity]) => ({ variantId, quantity }))
       .sort((a, b) => a.variantId - b.variantId);
 
-    return this.prisma.$transaction(async (tx) => {
+    const order = await this.prisma.$transaction(async (tx) => {
       let total = 0;
       const lines: Line[] = [];
 
@@ -67,10 +73,13 @@ export class OrdersService {
 
       return order;
     }, TX_OPTIONS);
+
+    await invalidateProductsOfVariants(this.redis, this.prisma, items.map((i) => i.variantId));
+    return order;
   }
 
   async cancel(id: number) {
-    return this.prisma.$transaction(async (tx) => {
+    const order = await this.prisma.$transaction(async (tx) => {
       // SELECT ... FOR UPDATE: khoá dòng đơn hàng, để 2 người cùng bấm "Huỷ"
       // thì người thứ hai phải chờ và thấy trạng thái đã là CANCELLED => không cộng kho 2 lần
       const rows = await tx.$queryRaw<{ status: string }[]>`
@@ -99,6 +108,9 @@ export class OrdersService {
 
       return tx.order.update({ where: { id }, data: { status: 'CANCELLED' }, include: WITH_ITEMS });
     }, TX_OPTIONS);
+
+    await invalidateProductsOfVariants(this.redis, this.prisma, order.items.map((i) => i.variantId));
+    return order;
   }
 
   async ship(id: number) {
@@ -158,7 +170,7 @@ export class OrdersService {
 
     const total = lines.reduce((sum, l) => sum + l.unitPrice * l.quantity, 0);
 
-    return this.prisma.$transaction(async (tx) => {
+    const order = await this.prisma.$transaction(async (tx) => {
       for (const l of lines) {
         const affected = await tx.$executeRaw`
           UPDATE "Inventory" SET available = available - ${l.quantity}, "updatedAt" = now()
@@ -194,6 +206,9 @@ export class OrdersService {
       });
       return order;
     }, TX_OPTIONS);
+
+    await invalidateProductsOfVariants(this.redis, this.prisma, lines.map((l) => l.variantId));
+    return order;
   }
 
   async cancelFromShopify(payload: ShopifyOrderPayload) {

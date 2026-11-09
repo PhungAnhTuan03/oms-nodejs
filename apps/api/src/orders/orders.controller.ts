@@ -1,5 +1,6 @@
 import { Body, Controller, Get, Param, ParseIntPipe, Patch, Post, Query, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
+import { RateLimitGuard } from '../common/rate-limit.guard.js';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard.js';
 import { RolesGuard } from '../auth/roles.guard.js';
 import { CreateOrderDto } from './dto/create-order.dto.js';
@@ -8,7 +9,7 @@ import { OrdersService } from './orders.service.js';
 
 @ApiTags('orders')
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard, RolesGuard)
+@UseGuards(JwtAuthGuard, RolesGuard, RateLimitGuard)
 @Controller('orders')
 export class OrdersController {
   constructor(private readonly orders: OrdersService) {}
