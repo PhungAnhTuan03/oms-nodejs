@@ -7,9 +7,10 @@ import { AppModule } from '../src/app.module.js';
 import { PrismaService } from '../src/prisma/prisma.service.js';
 import { REDIS } from '../src/redis/redis.module.js';
 import { configureApp } from '../src/setup-app.js';
+import { WorkerModule } from '../src/worker.module.js';
 
 export async function createTestApp() {
-  const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
+  const moduleRef = await Test.createTestingModule({ imports: [AppModule, WorkerModule] }).compile();
   const app = moduleRef.createNestApplication({ rawBody: true });
   configureApp(app);
   await app.init();
